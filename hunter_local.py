@@ -1,48 +1,30 @@
 ﻿"""
-Netflix India Offer Cookie Hunter — LOCAL v7
-============================================
+Netflix India Offer Cookie Hunter — hunter_local.py
+====================================================
 Run: python hunter_local.py
-     python hunter_local.py --tg-token TOKEN --tg-chat CHATID
 
-HOW IT ACTUALLY WORKS:
-  Netflix shows a special offer banner [data-uia="free-trial-banner"]
-  ONLY to sessions it decides are offer-eligible (fresh device, Indian IP,
-  no previous account). This is different from the regular "Get Started" CTA
-  which ALWAYS exists.
-
-  So: load page → look ONLY for the specific offer banner/element → if found
-  those cookies are valid offer cookies → save them. No clicking needed.
-
-  DO NOT click Get Started. That always leads to email form (not an offer).
+Looks for the EXACT same banner workinglocal.py used.
+Sends real working offer cookies to Telegram when found.
 """
 
-import asyncio, json, os, shutil, subprocess, sys, time, uuid, random, threading, base64
+import asyncio, json, os, shutil, subprocess, time, uuid, random, threading, base64
 from datetime import datetime
 from pathlib import Path
-import requests, websockets, websockets.exceptions
+import requests, websockets
 
-# ─── CONFIG ────────────────────────────────────────────────────────────────
-import argparse
-ap = argparse.ArgumentParser()
-ap.add_argument("--tg-token",  default="", help="Telegram bot token")
-ap.add_argument("--tg-chat",   default="", help="Telegram chat ID")
-ap.add_argument("--delay",     default=3.0, type=float, help="Seconds between attempts")
-ap.add_argument("--max",       default=99999, type=int)
-ARGS = ap.parse_args()
-
-TG_TOKEN = ARGS.tg_token
-TG_CHAT  = ARGS.tg_chat
-DELAY    = ARGS.delay
-NF_URL   = "https://www.netflix.com/in/"
-HERE     = Path(__file__).parent
+HERE      = Path(__file__).parent
+NF_URL    = "https://www.netflix.com/in/"
 BASE_PORT = 9600
+DELAY     = 4.0
+
+TG_TOKEN  = "8871993832:AAFKe9Y60EGhynDWO3ETESOdw2xawdA04rE"
+TG_CHAT   = "8725113938"
 
 CHROME_PATHS = [
     r"C:\Program Files\Google\Chrome\Application\chrome.exe",
     r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
     os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
 ]
-
 UAS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
@@ -52,86 +34,56 @@ UAS = [
 STEALTH_JS = r"""
 (function(){
   try{delete Object.getPrototypeOf(navigator).webdriver;}catch(e){}
-  Object.defineProperty(navigator,'webdriver',{get:()=>undefined,configurable:true});
-  for(let k of Object.keys(window)){if(/^cdc_|^\$cdc_/.test(k))try{delete window[k];}catch(e){}}
+  Object.defineProperty(navigator,'webdriver',{get:()=>false,configurable:true});
+  for(let k in window){if(k.match(/^cdc_/))try{delete window[k];}catch(e){}}
+  for(let k in document){if(k.match(/^cdc_|^\$cdc_/))try{delete document[k];}catch(e){}}
   Object.defineProperty(navigator,'plugins',{get:()=>[
-    {name:'Chrome PDF Plugin',filename:'internal-pdf-viewer',description:'',length:1},
+    {name:'Chrome PDF Plugin',filename:'internal-pdf-viewer',description:'PDF',length:1},
     {name:'Chrome PDF Viewer',filename:'mhjfbmdgcfjbbpaeojofohoefgiehjai',description:'',length:1},
-    {name:'Native Client',filename:'internal-nacl-plugin',description:'',length:2},
+    {name:'Native Client',filename:'internal-nacl-plugin',description:'',length:2}
   ]});
-  Object.defineProperty(navigator,'languages',{get:()=>['en-IN','hi-IN','en-GB','en']});
+  Object.defineProperty(navigator,'languages',{get:()=>['en-IN','en-GB','en']});
   window.chrome=window.chrome||{};
-  window.chrome.runtime=window.chrome.runtime||{};
+  window.chrome.runtime=window.chrome.runtime||{PlatformOs:{WIN:'win'}};
+  if(!window.chrome.csi)window.chrome.csi=()=>({startE:Date.now()});
+  if(!window.chrome.loadTimes)window.chrome.loadTimes=()=>({commitLoadTime:Date.now()/1000});
+  try{if(navigator.connection&&navigator.connection.rtt===0)
+    Object.defineProperty(navigator.connection,'rtt',{get:()=>50,configurable:true});}catch(e){}
 })();
 """
 
-# THE REAL OFFER DETECTION
-# Netflix shows a special offer banner ONLY to eligible sessions.
-# We look for SPECIFIC offer elements — NOT generic promo/marketing text.
-# No clicking. No confidence scores. It's there or it's not.
-OFFER_CHECK_JS = """
+# Exact same banner detection as workinglocal.py + button text check
+BANNER_CHECK_JS = """
 (function(){
-  var R = { found: false, element: '', text: '', url: window.location.href };
+  var R = {found:false, how:'', text:''};
 
-  // 1. The dedicated free trial banner — strongest signal
-  var freeTrialBanner = document.querySelector(
-    '[data-uia="free-trial-banner"], button[data-uia="free-trial-banner"]'
-  );
-  if (freeTrialBanner && freeTrialBanner.offsetParent !== null) {
-    R.found   = true;
-    R.element = 'free-trial-banner';
-    R.text    = freeTrialBanner.textContent.trim().substring(0, 120);
-    return R;
-  }
-
-  // 2. Offer-specific aria labels on buttons
-  var offerBtns = document.querySelectorAll(
-    'button[aria-label*="free trial"], button[aria-label*="Try 30"], button[aria-label*="Join free"]'
-  );
-  for (var b of offerBtns) {
-    if (b.offsetParent !== null) {
-      R.found   = true;
-      R.element = 'offer-aria-btn';
-      R.text    = b.textContent.trim().substring(0, 120);
+  // 1. Exact selectors from workinglocal.py — these are the real ones
+  var sels = [
+    'button[data-uia="free-trial-banner"]',
+    'button[aria-label*="free"]',
+    'button[aria-label*="Try 30 days"]',
+    '[data-uia="free-trial-banner"]'
+  ];
+  for(var s of sels){
+    var el = document.querySelector(s);
+    if(el && el.offsetParent !== null){
+      R.found = true;
+      R.how   = 'selector:' + s;
+      R.text  = el.textContent.trim().substring(0,100);
       return R;
     }
   }
 
-  // 3. Price elements showing Rs 0 or Free — ONLY in specific offer containers
-  //    (not in hero marketing section which always says "free trial")
-  var priceEls = document.querySelectorAll(
-    '[data-uia*="price"], [class*="PlanPrice"], [class*="planPrice"], [class*="offer-price"]'
-  );
-  for (var el of priceEls) {
-    var txt = el.textContent.toLowerCase();
-    if (txt.includes('rs. 0') || txt.includes('rs 0') || txt === '0' || txt.includes('\u20b90')) {
-      R.found   = true;
-      R.element = 'price-zero';
-      R.text    = el.textContent.trim().substring(0, 80);
+  // 2. Button text — "30 days" or "₹0" (also from workinglocal.py)
+  var btns = document.querySelectorAll('button');
+  for(var b of btns){
+    var txt = b.textContent || '';
+    if(b.offsetParent !== null && (txt.includes('30 days') || txt.includes('\u20b90'))){
+      R.found = true;
+      R.how   = 'btn_text';
+      R.text  = txt.trim().substring(0,100);
       return R;
     }
-  }
-
-  // 4. Offer badge / tag elements
-  var badges = document.querySelectorAll(
-    '[class*="offer-badge"], [class*="OfferBadge"], [data-uia*="offer-badge"]'
-  );
-  for (var b of badges) {
-    if (b.offsetParent !== null) {
-      R.found   = true;
-      R.element = 'offer-badge';
-      R.text    = b.textContent.trim().substring(0, 80);
-      return R;
-    }
-  }
-
-  // 5. Check page title / meta for offer keywords (Netflix sets these for offer pages)
-  var title = document.title.toLowerCase();
-  if (title.includes('free') && title.includes('month') && !title.includes('watch')) {
-    R.found   = true;
-    R.element = 'page-title-offer';
-    R.text    = document.title;
-    return R;
   }
 
   return R;
@@ -139,16 +91,11 @@ OFFER_CHECK_JS = """
 """
 
 
-# ─── HELPERS ───────────────────────────────────────────────────────────────
-def ts(): return datetime.now().strftime("%H:%M:%S")
-def log(msg, tag=""):
-    icon = {"OK":"[+]","ERR":"[!]","SKIP":"[-]","SAVE":"[*]"}.get(tag,"[~]")
-    print(f"{icon} [{ts()}] {msg}", flush=True)
-
+# ── Helpers ──────────────────────────────────────────────────────
 def find_chrome():
     for p in CHROME_PATHS:
         if os.path.exists(p): return p
-    raise FileNotFoundError("Chrome not found! Install Google Chrome.")
+    raise FileNotFoundError("Chrome not found!")
 
 def kill_port(port):
     try:
@@ -190,7 +137,7 @@ def fresh_cookies():
     ]
 
 
-# ─── CDP ───────────────────────────────────────────────────────────────────
+# ── CDP ──────────────────────────────────────────────────────────
 class CDP:
     def __init__(self, url):
         self._url=url; self.ws=None; self._id=0; self._p={}; self._dead=False
@@ -233,17 +180,16 @@ class CDP:
             except: pass
 
 
-# ─── TG ────────────────────────────────────────────────────────────────────
+# ── Telegram ─────────────────────────────────────────────────────
 class S:
     running    = True
     attempt    = 0
     found      = 0
     start      = time.time()
     last       = "starting..."
-    counter_id = 0
+    mid        = 0   # live counter message_id
 
 def tg_send(t):
-    if not TG_TOKEN: return 0
     try:
         r = requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
             json={"chat_id":TG_CHAT,"text":t,"parse_mode":"HTML"}, timeout=15)
@@ -251,14 +197,13 @@ def tg_send(t):
     except: return 0
 
 def tg_edit(mid, t):
-    if not TG_TOKEN or not mid: return
+    if not mid: return
     try:
         requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/editMessageText",
             json={"chat_id":TG_CHAT,"message_id":mid,"text":t,"parse_mode":"HTML"}, timeout=15)
     except: pass
 
 def tg_file(path, cap):
-    if not TG_TOKEN: return
     try:
         with open(path,"rb") as f:
             requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendDocument",
@@ -266,20 +211,14 @@ def tg_file(path, cap):
                 files={"document":(os.path.basename(path),f,"application/json")}, timeout=30)
     except: pass
 
-def tg_updates(off=0):
-    try:
-        r = requests.get(f"https://api.telegram.org/bot{TG_TOKEN}/getUpdates",
-            params={"timeout":30,"offset":off}, timeout=35)
-        return r.json().get("result",[])
-    except: return []
-
 def counter():
     e = int(time.time()-S.start); h,m,s = e//3600,(e%3600)//60,e%60
     rate = S.attempt/max(1,e/60)
+    status = "HUNTING" if S.running else "PAUSED"
     return (
-        "<b>Netflix Offer Hunter v7</b>\n"
+        "<b>Netflix Offer Hunter</b>\n"
         "-----------------------------\n"
-        f"Status:   {'HUNTING' if S.running else 'PAUSED'}\n"
+        f"Status:   {status}\n"
         f"Attempts: <code>{S.attempt}</code>\n"
         f"Found:    <code>{S.found}</code>\n"
         f"Speed:    <code>{rate:.1f}/min</code>\n"
@@ -290,29 +229,31 @@ def counter():
         "<i>/stop /start /status</i>"
     )
 
-def start_tg_poll():
+def start_poll():
     def _loop():
         off = 0
         while True:
-            for u in tg_updates(off):
-                off = u["update_id"]+1
-                msg = u.get("message") or u.get("channel_post") or {}
-                cmd = (msg.get("text") or "").strip().lower()
-                cid = str((msg.get("chat") or {}).get("id",""))
-                if cid != str(TG_CHAT): continue
-                if cmd in ["/start","/resume"]:   S.running = True;  tg_edit(S.counter_id, counter())
-                elif cmd in ["/stop","/pause"]:   S.running = False; tg_edit(S.counter_id, counter())
-                elif cmd == "/status":             tg_edit(S.counter_id, counter())
-                elif cmd == "/help":               tg_send("/start /stop /status /help")
+            try:
+                r = requests.get(f"https://api.telegram.org/bot{TG_TOKEN}/getUpdates",
+                    params={"timeout":30,"offset":off}, timeout=35)
+                for u in r.json().get("result",[]):
+                    off = u["update_id"]+1
+                    msg = u.get("message") or u.get("channel_post") or {}
+                    cmd = (msg.get("text") or "").strip().lower()
+                    cid = str((msg.get("chat") or {}).get("id",""))
+                    if cid != TG_CHAT: continue
+                    if cmd in ["/start","/resume"]:  S.running=True;  tg_edit(S.mid, counter())
+                    elif cmd in ["/stop","/pause"]:  S.running=False; tg_edit(S.mid, counter())
+                    elif cmd == "/status":            tg_edit(S.mid, counter())
+            except: pass
             time.sleep(2)
     threading.Thread(target=_loop, daemon=True).start()
 
 
-# ─── SINGLE HUNT ATTEMPT ───────────────────────────────────────────────────
+# ── Single Attempt ────────────────────────────────────────────────
 async def hunt_once(n, port):
     profile = str(HERE / f"_h_{uuid.uuid4().hex[:7]}")
     proc = None
-    ua   = random.choice(UAS)
     try:
         kill_port(port)
         os.makedirs(profile, exist_ok=True)
@@ -320,7 +261,7 @@ async def hunt_once(n, port):
             find_chrome(),
             f"--remote-debugging-port={port}",
             f"--user-data-dir={profile}",
-            f"--user-agent={ua}",
+            f"--user-agent={random.choice(UAS)}",
             "--incognito",
             "--no-first-run",
             "--no-default-browser-check",
@@ -331,56 +272,41 @@ async def hunt_once(n, port):
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         time.sleep(3)
-        ws  = get_ws(port)
-        cdp = CDP(ws)
+        cdp = CDP(get_ws(port))
         await cdp.connect()
-
         await cdp.cmd("Page.addScriptToEvaluateOnNewDocument", {"source": STEALTH_JS})
         await cdp.cmd("Network.enable")
-        await cdp.cmd("Page.enable")
 
-        # Inject fresh anonymous cookies — NEW device every attempt
+        # Fresh anonymous cookies — new device fingerprint every attempt
         for c in fresh_cookies():
             await cdp.cmd("Network.setCookie", {
                 "name":c["name"],"value":c["value"],"domain":c["domain"],
                 "path":c["path"],"secure":c["secure"],"httpOnly":c["httpOnly"]
             })
 
-        # Navigate to Netflix India
+        # Load Netflix India
         await cdp.cmd("Page.navigate", {"url": NF_URL})
-        await asyncio.sleep(9)  # wait for full render
+        await asyncio.sleep(9)  # full render wait
 
-        # Check ONLY for real offer elements — no clicking
-        result = await cdp.js(OFFER_CHECK_JS)
-
-        if not result or not result.get("found"):
+        # Check for REAL offer banner (same as workinglocal.py)
+        r = await cdp.js(BANNER_CHECK_JS)
+        if not r or not r.get("found"):
             await cdp.close()
-            return {"found": False, "n": n, "reason": "no_offer_element"}
+            return {"ok": False, "reason": "no_banner"}
 
-        # OFFER ELEMENT FOUND — capture cookies
+        # Banner found — grab cookies NOW before anything changes
         all_cookies = await cdp.all_cookies()
         nf_cookies  = [c for c in all_cookies if "netflix.com" in c.get("domain","")]
-
-        # Double-verify: check that cookies actually still show the offer
-        # (reload with same cookies and check again)
-        verify = await cdp.js(OFFER_CHECK_JS)
-        if not verify or not verify.get("found"):
-            await cdp.close()
-            return {"found": False, "n": n, "reason": "verify_failed_on_recheck"}
-
+        how         = r.get("how","")
+        text        = r.get("text","")
         await cdp.close()
-        return {
-            "found":    True,
-            "n":        n,
-            "element":  result.get("element",""),
-            "text":     result.get("text",""),
-            "url":      result.get("url",""),
-            "cookies":  nf_cookies
-        }
+
+        print(f"  [+] #{n} BANNER FOUND! [{how}] '{text[:60]}'", flush=True)
+        return {"ok": True, "cookies": nf_cookies, "how": how, "text": text}
 
     except Exception as e:
-        log(f"[{n}] error: {e}", "ERR")
-        return {"found": False, "n": n, "reason": str(e)}
+        print(f"  [!] #{n} error: {e}", flush=True)
+        return {"ok": False, "reason": str(e)}
     finally:
         kill_port(port)
         if proc:
@@ -389,93 +315,76 @@ async def hunt_once(n, port):
         shutil.rmtree(profile, ignore_errors=True)
 
 
-# ─── SAVE & DELIVER ────────────────────────────────────────────────────────
-def save_and_send(r, n):
+# ── Save & Deliver ────────────────────────────────────────────────
+def deliver(result, n):
     ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
     path   = HERE / f"OFFER_{ts_str}.json"
-
-    with open(path, "w") as f:
-        json.dump(r["cookies"], f, indent=2)
-
-    with open(HERE / "best_offer.json", "w") as f:
-        json.dump({
-            "found_at":  ts_str,
-            "attempt":   n,
-            "element":   r.get("element"),
-            "text":      r.get("text"),
-            "url":       r.get("url"),
-            "cookies":   r["cookies"]
-        }, f, indent=2)
-
-    names = [c.get("name","?") for c in r["cookies"]]
-    msg = (
-        "<b>OFFER COOKIE FOUND</b>\n\n"
+    with open(path,"w") as f:
+        json.dump(result["cookies"], f, indent=2)
+    with open(HERE/"best_offer.json","w") as f:
+        json.dump({"found_at":ts_str,"attempt":n,
+                   "how":result.get("how"),"text":result.get("text"),
+                   "cookies":result["cookies"]}, f, indent=2)
+    names = [c.get("name","?") for c in result["cookies"]]
+    tg_send(
+        f"<b>OFFER BANNER DETECTED — COOKIES CAPTURED</b>\n\n"
         f"Attempt: #{n}\n"
-        f"Element: <code>{r.get('element','')}</code>\n"
-        f"Text: <code>{r.get('text','')[:80]}</code>\n"
+        f"Banner: <code>{result.get('how','')}</code>\n"
+        f"Text: <code>{result.get('text','')[:80]}</code>\n"
         f"Cookies ({len(names)}): <code>{', '.join(names)}</code>\n\n"
-        "<i>JSON file attached</i>"
+        f"<i>JSON attached below</i>"
     )
-    tg_send(msg)
-    tg_file(str(path), f"Offer cookies #{n}")
-    print(f"\n{'='*50}\nOFFER FOUND! Saved: {path.name}\n{'='*50}\n", flush=True)
+    tg_file(str(path), f"Offer cookies — attempt #{n}")
+    print(f"\n{'='*55}", flush=True)
+    print(f"  OFFER FOUND! Saved: {path.name}", flush=True)
+    print(f"{'='*55}\n", flush=True)
 
 
-# ─── MAIN ──────────────────────────────────────────────────────────────────
+# ── Main ─────────────────────────────────────────────────────────
 async def main():
-    print("="*50)
-    print("  Netflix Offer Hunter v7 — LOCAL")
-    print("  Detection: specific offer banner only")
-    print("  No fake confidence scores")
-    print("="*50+"\n")
+    print("="*55)
+    print("  Netflix Offer Cookie Hunter — LOCAL")
+    print("  Token/Chat hardcoded. Just run: python hunter_local.py")
+    print("="*55+"\n")
 
-    chrome = find_chrome()
-    log(f"Chrome: {chrome}")
-    log(f"Delay: {DELAY}s | TG: {'yes' if TG_TOKEN else 'NO - add --tg-token'}")
+    find_chrome()  # fail fast if no chrome
 
-    if TG_TOKEN:
-        start_tg_poll()
-        tg_send(
-            "<b>Offer Hunter v7 STARTED</b>\n\n"
-            "Detecting: real offer banner only\n"
-            "No fake detections. Cookies sent only when 100% real.\n\n"
-            "/stop /start /status"
-        )
-        S.counter_id = tg_send(counter())
+    start_poll()
+    tg_send(
+        "<b>Offer Hunter STARTED</b>\n\n"
+        "Looking for: real offer banner [data-uia=free-trial-banner]\n"
+        "Sends cookies only when banner confirmed.\n\n"
+        "/stop /start /status"
+    )
+    S.mid = tg_send(counter())
 
     n = 0
-    while n < ARGS.max:
+    while True:
         if not S.running:
             await asyncio.sleep(3); continue
 
         n += 1
         S.attempt = n
         port = BASE_PORT + (n % 150)
-        log(f"Attempt #{n} on port {port}")
+        print(f"  [-] #{n} checking port {port}...", flush=True)
 
         result = await hunt_once(n, port)
 
-        if result.get("found"):
+        if result.get("ok"):
             S.found += 1
-            S.last   = f"FOUND #{n} [{result.get('element')}]"
-            log(f"#{n} OFFER FOUND! element={result.get('element')} text={result.get('text','')[:60]}", "OK")
-            save_and_send(result, n)
+            S.last   = f"FOUND #{n}"
+            deliver(result, n)
         else:
-            reason = result.get("reason","?")
-            S.last  = reason
-            log(f"#{n} skip: {reason}", "SKIP")
+            S.last = result.get("reason","?")
+            print(f"  [-] #{n} {S.last}", flush=True)
 
-        if TG_TOKEN and S.counter_id:
-            tg_edit(S.counter_id, counter())
-
+        tg_edit(S.mid, counter())
         await asyncio.sleep(DELAY + random.uniform(0, 1.5))
-
-    log("Max attempts done.")
 
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        log("Stopped.")
         tg_send("Hunter stopped.")
+        print("\nStopped.")
