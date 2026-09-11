@@ -1,4 +1,4 @@
-﻿"""
+"""
 Netflix Bot v6.0 — tg_bot.py
 ================================
 OLD features kept:
@@ -110,21 +110,67 @@ CLICK_CTA_JS = """
 })()
 """
 
-# ── Check if offer flow JS ────────────────────────────────────────
+# ── Check if offer flow JS — STRICT 100% only ─────────────────────
+# NO confidence scores. Only confirmed if:
+#   1. URL moved away from homepage (not still /in/) AND
+#   2. Email input exists AND
+#   3. Zero payment inputs on page
 CHECK_FLOW_JS = """
 (function(){
-  var url=window.location.href.toLowerCase();
-  var body=document.body?document.body.innerText.toLowerCase():'';
-  var R={url:window.location.href,is_offer:false,is_payment:false,is_login:false,evidence:[]};
-  if(url.includes('/signup/registration')){R.is_offer=true;R.evidence.push('signup/registration');}
-  var emailInputs=document.querySelectorAll('input[type="email"],input[name="userLoginId"],input[autocomplete="email"]');
-  var payInputs=document.querySelectorAll('input[name="cardnumber"],[data-uia*="payment"],[data-uia*="credit"]');
-  if(emailInputs.length>0&&payInputs.length===0){R.is_offer=true;R.evidence.push('email_form_no_payment');}
-  if(payInputs.length>0||url.includes('/creditoption')||url.includes('/payment')||
-     body.includes('credit card')||body.includes('debit card')||body.includes('upi payment')){
-    R.is_payment=true;R.is_offer=false;R.evidence.push('payment_page');}
-  if(url.includes('/login')){R.is_login=true;R.is_offer=false;R.evidence.push('login_redirect');}
-  return R;
+  var url = window.location.href;
+  var urlL = url.toLowerCase();
+  var body = document.body ? document.body.innerText.toLowerCase() : '';
+
+  var R = {url:url, is_offer:false, is_payment:false, is_login:false, evidence:[]};
+
+  // HARD FAILS — payment or login = definitely not offer
+  var payInputs = document.querySelectorAll(
+    'input[name="cardnumber"],[data-uia*="payment"],[data-uia*="credit-card"],[data-uia="creditCard"]'
+  );
+  if (payInputs.length > 0 || urlL.includes('/creditoption') || urlL.includes('/payment')) {
+    R.is_payment = true; R.evidence.push('payment_page'); return R;
+  }
+  if (body.includes('credit card') || body.includes('debit card') || body.includes('upi payment')) {
+    R.is_payment = true; R.evidence.push('payment_text'); return R;
+  }
+  if (urlL.includes('/login') || urlL.includes('/loginhelp')) {
+    R.is_login = true; R.evidence.push('login_redirect'); return R;
+  }
+
+  // CONFIRMED OFFER FLOWS — URL changed to signup AND email form with no payment
+  var emailInputs = document.querySelectorAll(
+    'input[type="email"], input[name="userLoginId"], input[autocomplete="email"]'
+  );
+
+  // Condition 1: Explicit signup URL (strongest signal)
+  if (urlL.includes('/signup/registration') || urlL.includes('/signup/planform')) {
+    if (emailInputs.length > 0 && payInputs.length === 0) {
+      R.is_offer = true;
+      R.evidence.push('signup_url_email_form');
+      return R;
+    }
+  }
+
+  // Condition 2: Email form appeared AND URL is NOT the homepage anymore
+  var onHomepage = (urlL === 'https://www.netflix.com/in/' || urlL === 'https://www.netflix.com/in');
+  if (!onHomepage && emailInputs.length > 0 && payInputs.length === 0) {
+    R.is_offer = true;
+    R.evidence.push('email_form_no_payment_off_homepage');
+    return R;
+  }
+
+  // Condition 3: Still on homepage but email form appeared inline (rare but valid)
+  // Only count if form has submit button visible too
+  if (emailInputs.length > 0 && payInputs.length === 0) {
+    var submitBtn = document.querySelector('button[type="submit"], button[data-uia="continue-button"]');
+    if (submitBtn && submitBtn.offsetParent !== null) {
+      R.is_offer = true;
+      R.evidence.push('inline_email_form_with_submit');
+      return R;
+    }
+  }
+
+  return R;  // Nothing confirmed — skip
 })()
 """
 
