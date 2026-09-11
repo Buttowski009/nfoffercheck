@@ -1,0 +1,20 @@
+﻿# Chrome temp profiles
+_hunt_*/
+_validate_*/
+chrome_tmp_*/
+p1_profile_*/
+proxy_ext_*/
+__pycache__/
+*.pyc
+*.pyo
+
+# Sensitive output files — dont push to git
+best_offer.json
+nf_offer_*.json
+offer_cookies_*.json
+*.png
+*.jpg
+
+# Local config
+mails.txt
+remain.txt

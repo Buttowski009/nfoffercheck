@@ -1,0 +1,8 @@
+﻿[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "python -u railway_hunter.py"
+restartPolicyType = "always"
+restartPolicyMaxRetries = 10
