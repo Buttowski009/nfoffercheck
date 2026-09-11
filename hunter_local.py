@@ -1,4 +1,4 @@
-﻿"""
+"""
 Netflix India Offer Cookie Hunter — hunter_local.py
 ====================================================
 Run: python hunter_local.py
@@ -7,8 +7,9 @@ Looks for the EXACT same banner workinglocal.py used.
 Sends real working offer cookies to Telegram when found.
 """
 
-import asyncio, json, os, shutil, subprocess, time, uuid, random, threading, base64
-from datetime import datetime
+import asyncio, json, os, shutil, subprocess, time, uuid, random, threading, base64, warnings
+warnings.filterwarnings("ignore")
+from datetime import datetime, timezone
 from pathlib import Path
 import requests, websockets
 
@@ -124,7 +125,7 @@ def fresh_cookies():
     ts_ms = int(time.time()*1000)
     consent = (
         f"landingPath=https%3A%2F%2Fwww.netflix.com%2Fin%2F"
-        f"&datestamp={datetime.utcnow().strftime('%a+%b+%d+%Y+%H%%3A%M%%3A%S+GMT%%2B0000')}"
+        f"&datestamp={datetime.now(timezone.utc).strftime('%a+%b+%d+%Y+%H%%3A%M%%3A%S+GMT%%2B0000')}"
         f"&version=202604.2.0&groups=C0001%3A1%2CC0002%3A1%2CC0003%3A1%2CC0004%3A1"
         f"&consentId={cid}&isAnonUser=1&prevHadToken=0&crTime={ts_ms}"
         f"&isGpcEnabled=0&isDntEnabled=0&isIABGlobal=false&geolocation=IN%3BMH"
@@ -262,11 +263,15 @@ async def hunt_once(n, port):
             f"--remote-debugging-port={port}",
             f"--user-data-dir={profile}",
             f"--user-agent={random.choice(UAS)}",
+            "--headless=new",
             "--incognito",
             "--no-first-run",
             "--no-default-browser-check",
             "--disable-blink-features=AutomationControlled",
             "--disable-extensions",
+            "--disable-gpu",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
             "--window-size=1366,768",
             "about:blank"
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
